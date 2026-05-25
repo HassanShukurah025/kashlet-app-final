@@ -4,13 +4,115 @@ import { ArrowLeft, Download, CheckCircle, Trash2, Edit3, Send } from 'lucide-re
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../hooks/useAuth';
 import { useToast } from '../hooks/useToast';
-import { formatCurrency, formatDate } from '../lib/utils';
+import { formatCurrency, formatDate, generatePdf } from '../lib/utils';
 import type { Invoice, Client } from '../lib/types';
 import Badge from '../components/ui/Badge';
 import Button from '../components/ui/Button';
 import ErrorState from '../components/ui/ErrorState';
 import { CardSkeleton } from '../components/ui/Skeleton';
 import ConfirmModal from '../components/ui/ConfirmModal';
+
+function buildInvoiceHtml(invoice: Invoice, client: Client | null, profile: any): string {
+  const currency = invoice.currency || 'USD';
+  const logoUrl = profile?.business_logo_url;
+
+  const itemsHtml = invoice.items.length
+    ? `<table style="width:100%;font-size:14px;border-collapse:collapse;">
+        <thead>
+          <tr style="color:#6B7280;border-bottom:1px solid #2A2F3A;">
+            <th style="text-align:left;padding:8px 0;">Description</th>
+            <th style="text-align:right;padding:8px 0;">Qty</th>
+            <th style="text-align:right;padding:8px 0;">Rate</th>
+            <th style="text-align:right;padding:8px 0;">Tax</th>
+            <th style="text-align:right;padding:8px 0;">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${invoice.items.map((item) => `
+            <tr style="border-bottom:1px solid #2A2F3A;">
+              <td style="padding:12px 0;color:#F9FAFB;">${item.description}</td>
+              <td style="padding:12px 0;text-align:right;color:#9CA3AF;">${item.quantity}</td>
+              <td style="padding:12px 0;text-align:right;color:#9CA3AF;">${formatCurrency(item.rate, currency)}</td>
+              <td style="padding:12px 0;text-align:right;color:#9CA3AF;">${item.tax}%</td>
+              <td style="padding:12px 0;text-align:right;color:#F9FAFB;">${formatCurrency(item.total, currency)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>`
+    : '';
+
+  const discountHtml = invoice.discount > 0
+    ? `<div style="display:flex;justify-content:space-between;font-size:14px;">
+         <span style="color:#9CA3AF;">Discount</span>
+         <span style="color:#EF4444;">-${formatCurrency(invoice.discount, currency)}</span>
+       </div>`
+    : '';
+
+  const paymentTermsHtml = invoice.payment_terms
+    ? `<div style="margin-bottom:12px;">
+         <h4 style="font-size:11px;font-weight:500;color:#6B7280;text-transform:uppercase;margin:0 0 4px;">Payment Terms</h4>
+         <p style="font-size:14px;color:#9CA3AF;margin:0;">${invoice.payment_terms}</p>
+       </div>`
+    : '';
+
+  const notesHtml = invoice.notes
+    ? `<div>
+         <h4 style="font-size:11px;font-weight:500;color:#6B7280;text-transform:uppercase;margin:0 0 4px;">Notes</h4>
+         <p style="font-size:14px;color:#9CA3AF;margin:0;">${invoice.notes}</p>
+       </div>`
+    : '';
+
+  const extrasHtml = (invoice.notes || invoice.payment_terms)
+    ? `<div style="margin-top:32px;border-top:1px solid #2A2F3A;padding-top:24px;">
+         ${paymentTermsHtml}${notesHtml}
+       </div>`
+    : '';
+
+  return `
+    <div style="display:flex;justify-content:space-between;margin-bottom:32px;">
+      <div style="display:flex;align-items:start;gap:16px;">
+        ${logoUrl ? `<img src="${logoUrl}" alt="Logo" style="width:48px;height:48px;object-fit:contain;margin:0;" />` : ''}
+        <div>
+          <h2 style="font-size:20px;font-weight:600;color:#F9FAFB;margin:0 0 4px;">${profile?.business_name || 'Your Business'}</h2>
+          <p style="font-size:14px;color:#9CA3AF;margin:0;">${profile?.business_email || ''}</p>
+          <p style="font-size:14px;color:#9CA3AF;margin:0;">${profile?.business_address || ''}</p>
+          <p style="font-size:14px;color:#9CA3AF;margin:0;">${profile?.business_phone || ''}</p>
+        </div>
+      </div>
+      <div style="text-align:right;">
+        <h3 style="font-size:18px;font-weight:600;color:#F9FAFB;margin:0 0 4px;">INVOICE</h3>
+        <p style="font-size:14px;color:#9CA3AF;margin:0;">${invoice.invoice_number}</p>
+        <p style="font-size:14px;color:#9CA3AF;margin:0;">Date: ${formatDate(invoice.invoice_date)}</p>
+        <p style="font-size:14px;color:#9CA3AF;margin:0;">Due: ${formatDate(invoice.due_date)}</p>
+      </div>
+    </div>
+    <div style="margin-bottom:32px;">
+      <h4 style="font-size:11px;font-weight:500;color:#6B7280;text-transform:uppercase;margin:0 0 8px;">Bill To</h4>
+      <p style="font-size:14px;color:#F9FAFB;font-weight:500;margin:0;">${client?.name || 'No client'}</p>
+      <p style="font-size:14px;color:#9CA3AF;margin:0;">${client?.email || ''}</p>
+      <p style="font-size:14px;color:#9CA3AF;margin:0;">${client?.address || ''}</p>
+    </div>
+    ${itemsHtml ? `<div style="margin-bottom:24px;">${itemsHtml}</div>` : ''}
+    <div style="display:flex;justify-content:flex-end;">
+      <div style="width:256px;">
+        <div style="display:flex;justify-content:space-between;font-size:14px;">
+          <span style="color:#9CA3AF;">Subtotal</span>
+          <span style="color:#F9FAFB;">${formatCurrency(invoice.subtotal, currency)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:14px;">
+          <span style="color:#9CA3AF;">Tax</span>
+          <span style="color:#F9FAFB;">${formatCurrency(invoice.tax_total, currency)}</span>
+        </div>
+        ${discountHtml}
+        <div style="display:flex;justify-content:space-between;font-size:14px;font-weight:600;border-top:1px solid #2A2F3A;padding-top:8px;margin-top:8px;">
+          <span style="color:#F9FAFB;">Total</span>
+          <span style="color:#F9FAFB;">${formatCurrency(invoice.total, currency)}</span>
+        </div>
+      </div>
+    </div>
+    ${extrasHtml}
+  `;
+}
 
 export default function InvoiceDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -107,36 +209,22 @@ export default function InvoiceDetailPage() {
     setDeleteModal(false);
   };
 
-  const downloadPdf = () => {
-    addToast('info', 'Generating PDF...');
-    const el = document.getElementById('invoice-preview');
-    if (!el) {
-      addToast('error', 'PDF generation failed', { label: 'Retry', onClick: downloadPdf });
-      return;
-    }
-    const clone = el.cloneNode(true) as HTMLElement;
-    clone.style.cssText = 'position:fixed;left:-9999px;top:0;width:700px;padding:40px;background:#0B0F14;color:#F9FAFB;font-family:sans-serif;';
-    document.body.appendChild(clone);
+  const [downloading, setDownloading] = useState(false);
 
-    import('html2pdf.js').then((mod) => {
-      const generator = mod.default();
-      generator.set({
-        margin: [10, 10, 10, 10],
-        filename: `${invoice?.invoice_number || 'invoice'}.pdf`,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true, backgroundColor: '#0B0F14' },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-      }).from(clone).save().then(() => {
-        document.body.removeChild(clone);
-        addToast('success', 'Invoice downloaded');
-      }).catch(() => {
-        document.body.removeChild(clone);
-        addToast('error', 'PDF generation failed', { label: 'Retry', onClick: downloadPdf });
-      });
-    }).catch(() => {
-      document.body.removeChild(clone);
-      addToast('error', 'PDF export not available', { label: 'Retry', onClick: downloadPdf });
-    });
+  const downloadPdf = async () => {
+    if (!invoice || loading || downloading) return;
+    setDownloading(true);
+    addToast('info', 'Generating PDF...');
+
+    try {
+      const html = buildInvoiceHtml(invoice, client, profile);
+      await generatePdf(html, `${invoice.invoice_number}.pdf`);
+      addToast('success', 'Invoice downloaded');
+    } catch {
+      addToast('error', 'PDF generation failed', { label: 'Retry', onClick: downloadPdf });
+    } finally {
+      setDownloading(false);
+    }
   };
 
   if (loading) {
@@ -175,7 +263,7 @@ export default function InvoiceDetailPage() {
           {invoice.status !== 'paid' && (
             <Button variant="primary" size="sm" icon={<CheckCircle className="w-3.5 h-3.5" />} onClick={markAsPaid} loading={markingPaid}>Mark as Paid</Button>
           )}
-          <Button variant="secondary" size="sm" icon={<Download className="w-3.5 h-3.5" />} onClick={downloadPdf}>PDF</Button>
+          <Button variant="secondary" size="sm" icon={<Download className="w-3.5 h-3.5" />} onClick={downloadPdf} loading={downloading} disabled={loading}>PDF</Button>
           <Button variant="ghost" size="sm" icon={<Edit3 className="w-3.5 h-3.5" />} onClick={() => navigate(`/invoices/${invoice.id}/edit`)}>Edit</Button>
           <Button variant="ghost" size="sm" icon={<Trash2 className="w-3.5 h-3.5" />} onClick={() => setDeleteModal(true)} />
         </div>

@@ -72,6 +72,70 @@ export function calculateInvoiceTotals(
   };
 }
 
+function waitForRender(container: HTMLElement, retries = 2): Promise<void> {
+  return new Promise((resolve) => {
+    const check = (remaining: number) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (container.scrollHeight > 0 || remaining <= 0) {
+            resolve();
+            return;
+          }
+          check(remaining - 1);
+        });
+      });
+    };
+    check(retries);
+  });
+}
+
+function waitForImages(container: HTMLElement): Promise<void> {
+  const images = container.querySelectorAll('img');
+  if (images.length === 0) return Promise.resolve();
+  return Promise.all(
+    Array.from(images).map(
+      (img) =>
+        new Promise<void>((resolve) => {
+          if (img.complete) { resolve(); return; }
+          img.onload = () => resolve();
+          img.onerror = () => resolve();
+        })
+    )
+  ).then(() => undefined);
+}
+
+export async function generatePdf(
+  htmlContent: string,
+  filename: string,
+): Promise<void> {
+  const container = document.createElement('div');
+  container.innerHTML = htmlContent;
+  container.style.cssText =
+    'position:fixed;left:-9999px;top:0;width:700px;padding:40px;background:#0B0F14;color:#F9FAFB;font-family:"Plus Jakarta Sans",sans-serif;line-height:24px;font-size:14px;';
+  document.body.appendChild(container);
+
+  try {
+    await waitForRender(container);
+    await waitForImages(container);
+    await waitForRender(container);
+
+    const mod = await import('html2pdf.js');
+    const generator = mod.default();
+    await generator
+      .set({
+        margin: [10, 10, 10, 10],
+        filename,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true, backgroundColor: '#0B0F14' },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      })
+      .from(container)
+      .save();
+  } finally {
+    document.body.removeChild(container);
+  }
+}
+
 export const CURRENCIES = [
   { code: 'USD', name: 'US Dollar' },
   { code: 'EUR', name: 'Euro' },

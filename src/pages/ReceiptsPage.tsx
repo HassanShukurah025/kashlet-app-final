@@ -4,12 +4,59 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../hooks/useAuth';
 import { useToast } from '../hooks/useToast';
-import { formatCurrency, formatDate } from '../lib/utils';
+import { formatCurrency, formatDate, generatePdf } from '../lib/utils';
 import type { Receipt } from '../lib/types';
 import Button from '../components/ui/Button';
 import EmptyState from '../components/ui/EmptyState';
 import ErrorState from '../components/ui/ErrorState';
 import { TableSkeleton } from '../components/ui/Skeleton';
+
+function buildReceiptHtml(receipt: Receipt, profile: any): string {
+  const inv = (receipt.invoices || {}) as any;
+  const logoUrl = profile?.business_logo_url;
+  const currency = inv?.currency || 'USD';
+
+  const itemsHtml = inv?.items?.length
+    ? `<table style="width:100%;font-size:14px;border-collapse:collapse;">
+        <thead>
+          <tr style="color:#6B7280;border-bottom:1px solid #2A2F3A;">
+            <th style="text-align:left;padding:8px 0;">Description</th>
+            <th style="text-align:right;padding:8px 0;">Qty</th>
+            <th style="text-align:right;padding:8px 0;">Rate</th>
+            <th style="text-align:right;padding:8px 0;">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${inv.items.map((item: any) => `
+            <tr style="border-bottom:1px solid #2A2F3A;">
+              <td style="padding:8px 0;color:#F9FAFB;">${item.description}</td>
+              <td style="padding:8px 0;text-align:right;color:#9CA3AF;">${item.quantity}</td>
+              <td style="padding:8px 0;text-align:right;color:#9CA3AF;">${formatCurrency(item.rate, currency)}</td>
+              <td style="padding:8px 0;text-align:right;color:#F9FAFB;">${formatCurrency(item.total, currency)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>`
+    : '';
+
+  return `
+    <div style="text-align:center;margin-bottom:32px;">
+      ${logoUrl ? `<img src="${logoUrl}" alt="Logo" style="width:48px;height:48px;object-fit:contain;margin:0 auto 12px;display:block;" />` : ''}
+      <h2 style="font-size:24px;font-weight:700;margin:0 0 4px;">RECEIPT</h2>
+      <p style="font-size:14px;color:#9CA3AF;margin:0;">${receipt.receipt_number}</p>
+      <p style="font-size:12px;color:#6B7280;margin:4px 0 0;">Issued: ${formatDate(receipt.issued_at)}</p>
+    </div>
+    <div style="border-top:1px solid #2A2F3A;padding-top:16px;margin-bottom:16px;">
+      <p style="font-size:14px;color:#9CA3AF;margin:0 0 4px;">From: ${profile?.business_name || ''}</p>
+      <p style="font-size:14px;color:#9CA3AF;margin:0 0 4px;">Invoice: ${inv?.invoice_number || '—'}</p>
+      <p style="font-size:18px;font-weight:600;color:#F9FAFB;margin:8px 0 0;">Total: ${inv ? formatCurrency(inv.total, currency) : '—'}</p>
+    </div>
+    ${itemsHtml ? `<div style="border-top:1px solid #2A2F3A;padding-top:16px;">${itemsHtml}</div>` : ''}
+    <div style="margin-top:32px;border-top:1px solid #2A2F3A;padding-top:16px;text-align:center;">
+      <p style="font-size:12px;color:#6B7280;margin:0;">Thank you for your business.</p>
+    </div>
+  `;
+}
 
 export default function ReceiptsPage() {
   const navigate = useNavigate();
@@ -21,19 +68,15 @@ export default function ReceiptsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [viewReceipt, setViewReceipt] = useState<Receipt | null>(null);
   const [profile, setProfile] = useState<any>(null);
+  const [downloading, setDownloading] = useState<string | null>(null);
 
   const fetchReceipts = useCallback(async () => {
     if (!user) return;
     setLoading(true);
     setError(null);
-    const [receiptRes, profileRes] = await Promise.all([
-      supabase
-        .from('receipts')
-        .select('*, invoices(*)')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false }),
-      supabase.from('users').select('*').eq('id', user.id).maybeSingle(),
-    ]);
+
+    const profileRes = await supabase.from('users').select('*').eq('id', user.id).maybeSingle();
+    setProfile(profileRes.data);
 
     let query = supabase
       .from('receipts')
@@ -45,85 +88,25 @@ export default function ReceiptsPage() {
     const { data, error: err } = await query;
     if (err) setError('Failed to load receipts');
     else setReceipts((data as Receipt[]) || []);
-    setProfile(profileRes.data);
     setLoading(false);
   }, [user, searchQuery]);
 
   useEffect(() => { fetchReceipts(); }, [fetchReceipts]);
 
-  const downloadReceiptPdf = (receipt: Receipt) => {
+  const downloadReceiptPdf = async (receipt: Receipt) => {
+    if (loading || downloading) return;
+    setDownloading(receipt.id);
     addToast('info', 'Generating receipt PDF...');
 
-    const inv = (receipt.invoices || {}) as any;
-    const logoUrl = profile?.business_logo_url;
-    const currency = inv?.currency || 'USD';
-
-    const container = document.createElement('div');
-    container.id = 'receipt-pdf-temp';
-    container.style.cssText = 'position:fixed;left:-9999px;top:0;width:700px;padding:40px;background:#0B0F14;color:#F9FAFB;font-family:sans-serif;';
-
-    container.innerHTML = `
-      <div style="text-align:center;margin-bottom:32px;">
-        ${logoUrl ? `<img src="${logoUrl}" alt="Logo" style="width:48px;height:48px;object-fit:contain;margin:0 auto 12px;display:block;" />` : ''}
-        <h2 style="font-size:24px;font-weight:700;margin:0 0 4px;">RECEIPT</h2>
-        <p style="font-size:14px;color:#9CA3AF;margin:0;">${receipt.receipt_number}</p>
-        <p style="font-size:12px;color:#6B7280;margin:4px 0 0;">Issued: ${formatDate(receipt.issued_at)}</p>
-      </div>
-      <div style="border-top:1px solid #2A2F3A;padding-top:16px;margin-bottom:16px;">
-        <p style="font-size:14px;color:#9CA3AF;margin:0 0 4px;">From: ${profile?.business_name || ''}</p>
-        <p style="font-size:14px;color:#9CA3AF;margin:0 0 4px;">Invoice: ${inv?.invoice_number || '—'}</p>
-        <p style="font-size:18px;font-weight:600;color:#F9FAFB;margin:8px 0 0;">Total: ${inv ? formatCurrency(inv.total, currency) : '—'}</p>
-      </div>
-      ${inv?.items?.length ? `
-      <div style="border-top:1px solid #2A2F3A;padding-top:16px;">
-        <table style="width:100%;font-size:14px;border-collapse:collapse;">
-          <thead>
-            <tr style="color:#6B7280;border-bottom:1px solid #2A2F3A;">
-              <th style="text-align:left;padding:8px 0;">Description</th>
-              <th style="text-align:right;padding:8px 0;">Qty</th>
-              <th style="text-align:right;padding:8px 0;">Rate</th>
-              <th style="text-align:right;padding:8px 0;">Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${inv.items.map((item: any) => `
-              <tr style="border-bottom:1px solid #2A2F3A;">
-                <td style="padding:8px 0;color:#F9FAFB;">${item.description}</td>
-                <td style="padding:8px 0;text-align:right;color:#9CA3AF;">${item.quantity}</td>
-                <td style="padding:8px 0;text-align:right;color:#9CA3AF;">${formatCurrency(item.rate, currency)}</td>
-                <td style="padding:8px 0;text-align:right;color:#F9FAFB;">${formatCurrency(item.total, currency)}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>
-      ` : ''}
-      <div style="margin-top:32px;border-top:1px solid #2A2F3A;padding-top:16px;text-align:center;">
-        <p style="font-size:12px;color:#6B7280;margin:0;">Thank you for your business.</p>
-      </div>
-    `;
-
-    document.body.appendChild(container);
-
-    import('html2pdf.js').then((mod) => {
-      const generator = mod.default();
-      generator.set({
-        margin: [10, 10, 10, 10],
-        filename: `${receipt.receipt_number}.pdf`,
-        image: { type: 'jpeg', quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true, backgroundColor: '#0B0F14' },
-        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-      }).from(container).save().then(() => {
-        document.body.removeChild(container);
-        addToast('success', 'Receipt downloaded');
-      }).catch(() => {
-        document.body.removeChild(container);
-        addToast('error', 'PDF generation failed', { label: 'Retry', onClick: () => downloadReceiptPdf(receipt) });
-      });
-    }).catch(() => {
-      document.body.removeChild(container);
-      addToast('error', 'PDF export not available');
-    });
+    try {
+      const html = buildReceiptHtml(receipt, profile);
+      await generatePdf(html, `${receipt.receipt_number}.pdf`);
+      addToast('success', 'Receipt downloaded');
+    } catch {
+      addToast('error', 'PDF generation failed', { label: 'Retry', onClick: () => downloadReceiptPdf(receipt) });
+    } finally {
+      setDownloading(null);
+    }
   };
 
   return (
@@ -181,7 +164,7 @@ export default function ReceiptsPage() {
                       <td className="px-5 py-3">
                         <div className="flex items-center gap-1">
                           <Button variant="ghost" size="sm" icon={<Eye className="w-3.5 h-3.5" />} onClick={() => setViewReceipt(rc)} />
-                          <Button variant="ghost" size="sm" icon={<Download className="w-3.5 h-3.5" />} onClick={() => downloadReceiptPdf(rc)} />
+                          <Button variant="ghost" size="sm" icon={<Download className="w-3.5 h-3.5" />} onClick={() => downloadReceiptPdf(rc)} loading={downloading === rc.id} />
                         </div>
                       </td>
                     </tr>
@@ -245,7 +228,7 @@ export default function ReceiptsPage() {
                 </div>
               </div>
               <div className="flex justify-end gap-2 mt-6">
-                <Button variant="secondary" onClick={() => downloadReceiptPdf(viewReceipt)} icon={<Download className="w-4 h-4" />}>Download PDF</Button>
+                <Button variant="secondary" onClick={() => downloadReceiptPdf(viewReceipt)} icon={<Download className="w-4 h-4" />} loading={downloading === viewReceipt.id}>Download PDF</Button>
                 <Button variant="ghost" onClick={() => setViewReceipt(null)}>Close</Button>
               </div>
             </div>
